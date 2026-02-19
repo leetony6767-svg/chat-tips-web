@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>極速撩妹 - 雲端版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #050505; }
+        .gold-border { border: 1px solid rgba(255, 204, 0, 0.3); }
+        .flash-gradient { background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%); }
+    </style>
+</head>
+<body class="text-gray-100 select-none">
+
+    <div id="lock-screen" class="fixed inset-0 bg-black flex flex-col items-center justify-center z-50 p-8 text-center">
+        <div class="w-20 h-20 flash-gradient rounded-[2rem] mb-6 flex items-center justify-center shadow-2xl">
+            <span class="text-black text-5xl font-black italic">F</span>
+        </div>
+        <h2 class="text-3xl font-black mb-2 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500">極速撩妹</h2>
+        <p class="text-gray-500 text-[10px] mb-8 tracking-[0.2em]">到期自動管理系統</p>
+        
+        <input type="tel" id="user-phone" class="bg-gray-900 border gold-border p-4 rounded-2xl mb-4 w-full max-w-xs text-center focus:outline-none focus:ring-2 focus:ring-orange-500 text-white text-lg" placeholder="請輸入手機號碼">
+        <button id="login-btn" onclick="checkCloudAuth()" class="flash-gradient text-black px-12 py-4 rounded-2xl font-black text-lg w-full max-w-xs active:scale-95 transition-all">確認登入</button>
+        
+        <div class="mt-10 p-5 rounded-2xl bg-gray-900/50 border gold-border w-full max-w-xs text-xs text-gray-500">
+            <p class="text-orange-400 font-bold mb-1 italic text-center">續費或開通聯繫管理員</p>
+        </div>
+    </div>
+
+    <div id="main-content" class="hidden min-h-screen p-6">
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-black italic text-orange-500">FLASH <span class="text-white">CHAT</span></h1>
+            <div id="expire-tag" class="px-3 py-1 bg-green-500/10 border border-green-500/30 rounded-full">
+                </div>
+        </div>
+
+        <div class="grid gap-4">
+            <button onclick="copy('你好呀，看你頭像感覺是個很有趣的人！')" class="bg-gray-900 p-6 rounded-3xl text-left border border-white/5 active:bg-orange-500 transition-all">
+                <p class="text-[10px] text-orange-500 font-bold mb-1 uppercase">🔥 開場話術</p>
+                <p class="font-medium">你好呀，看你頭像感覺是個很有趣的人！</p>
+            </button>
+            <button onclick="copy('你平常也這麼幽默嗎？')" class="bg-gray-900 p-6 rounded-3xl text-left border border-white/5 active:bg-orange-500 transition-all">
+                <p class="text-[10px] text-orange-500 font-bold mb-1 uppercase">💬 互動話術</p>
+                <p class="font-medium">你平常也這麼幽默嗎？</p>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // 你提供的試算表 ID
+        const SHEET_ID = '1jphmwvB-YxwNABEIvnQM4lv7kcvHJJwVplYY1UKmEbc'; 
+        const SHEET_NAME = '工作表1'; 
+
+        async function checkCloudAuth() {
+            const phone = document.getElementById('user-phone').value.trim();
+            const btn = document.getElementById('login-btn');
+            if (!phone) return alert('請輸入號碼');
+            
+            // 防呆處理：客戶輸入有無 0 都能識別
+            const cleanPhone = phone.startsWith('0') ? phone.substring(1) : phone;
+            btn.innerText = "驗證中...";
+
+            try {
+                // 從 Google Sheets 抓取 CSV 格式數據
+                const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${SHEET_NAME}`;
+                const response = await fetch(url);
+                const csvData = await response.text();
+                
+                // 將 CSV 分割成行，並移除多餘的引號
+                const rows = csvData.split('\n').map(row => row.split(',').map(cell => cell.replace(/"/g, '')));
+                
+                // 比對電話號碼
+                const userRow = rows.find(r => r[0] === phone || r[0] === cleanPhone);
+
+                if (userRow) {
+                    const expireDateStr = userRow[1]; // B 欄位的到期日
+                    const expireDate = new Date(expireDateStr);
+                    const today = new Date();
+
+                    // 檢查是否過期
+                    if (today > expireDate) {
+                        alert('您的授權已於 ' + expireDateStr + ' 到期，請聯繫續費！');
+                    } else {
+                        document.getElementById('expire-tag').innerHTML = `<span class="text-[9px] text-green-400 font-bold">● 到期日：${expireDateStr}</span>`;
+                        document.getElementById('lock-screen').classList.add('hidden');
+                        document.getElementById('main-content').classList.remove('hidden');
+                    }
+                } else {
+                    alert('號碼未授權，請聯繫管理員！');
+                }
+            } catch (e) {
+                alert('連線失敗，請檢查表格共用設定為「知道連結的任何人」。');
+            } finally {
+                btn.innerText = "確認登入";
+            }
+        }
+
+        function copy(t) {
+            navigator.clipboard.writeText(t);
+            alert('已複製成功！');
+        }
+    </script>
+</body>
+</html>
