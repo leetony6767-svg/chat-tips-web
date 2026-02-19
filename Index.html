@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Tips</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .chat-btn { background-color: #FFCC00; border: 4px solid white; box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
+        .chat-tag { background: black; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="fixed bottom-10 right-10 flex flex-col items-end">
+        <div id="menu" class="hidden mb-4 w-56 bg-white rounded-2xl shadow-2xl border overflow-hidden">
+            <div class="p-3 bg-yellow-400 font-bold text-center">💡 聊天話術</div>
+            <button onclick="copy('你好呀！😊')" class="w-full p-3 text-left border-b hover:bg-gray-100">你好呀！😊</button>
+            <button onclick="copy('今天心情如何？')" class="w-full p-3 text-left border-b hover:bg-gray-100">今天心情如何？</button>
+            <button onclick="copy('最近有什麼好玩的？')" class="w-full p-3 text-left hover:bg-gray-100">最近有什麼好玩的？</button>
+        </div>
+        <button onclick="document.getElementById('menu').classList.toggle('hidden')" class="chat-btn w-20 h-20 rounded-full flex flex-col items-center justify-center active:scale-90 transition-transform">
+            <div class="chat-tag">Chat</div>
+            <div class="text-black font-black text-xl italic">Tips</div>
+        </button>
+    </div>
+    <script>
+        function copy(text) {
+            navigator.clipboard.writeText(text);
+            alert('已複製到剪貼簿：' + text);
+        }
+    </script>
+</body>
+</html>
