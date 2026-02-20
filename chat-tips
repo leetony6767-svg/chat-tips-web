@@ -1,1 +1,38 @@
-# chat-tips-web
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>極速撩妹 - 雲端版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #050505; }
+        .gold-border { border: 1px solid rgba(255, 215, 0, 0.3); }
+        .glitter-bg { background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%); }
+    </style>
+</head>
+<body class="text-gray-100 select-none">
+    <div class="max-w-md mx-auto min-h-screen flex flex-col p-4">
+        <header class="text-center py-6">
+            <h1 class="text-3xl font-bold text-yellow-500 tracking-widest">極速撩妹技巧</h1>
+            <p class="text-gray-400 text-sm mt-2">最強聊天話術庫</p>
+        </header>
+
+        <div class="space-y-4">
+            <div class="glitter-bg gold-border p-4 rounded-xl">
+                <h2 class="text-yellow-400 font-bold mb-2">🔥 開場白專區</h2>
+                <p class="text-gray-300">「你有地圖嗎？我在你的眼神裡迷路了。」</p>
+            </div>
+            
+            <div class="glitter-bg gold-border p-4 rounded-xl">
+                <h2 class="text-yellow-400 font-bold mb-2">💎 幽默回話</h2>
+                <p class="text-gray-300">「我不吃甜點，因為你已經夠甜了。」</p>
+            </div>
+        </div>
+
+        <footer class="mt-auto py-6 text-center text-gray-600 text-xs">
+            © 2026 極速撩妹技巧 - 雲端即時版
+        </footer>
+    </div>
+</body>
+</html>
