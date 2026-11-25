@@ -3,236 +3,223 @@
 Telegram + Gemini 全能私人助理 Bot
 ===================================
 功能：
-  - 收到「發布影片」→ 自動尋找最新 .mp4 並標記為待發布
-  - 收到其他任何訊息 → 調用 Gemini API 上網搜尋並回覆
-  - Chat ID 自動記錄到 chat_id.conf
+  - 收到「發布影片」→ 從 VIDEO_DIR 抓最新 .mp4 → 回覆「影片已發布」
+  - 收到其他任何訊息 → 調用 Gemini API 上網搜尋並整理後回覆
+  - Chat ID 自動記錄到本地檔
 
-部署：
-  - 本機測試：python bot.py
-  - Render 部署：render.yaml + Procfile
-  - 環境變數：TELEGRAM_BOT_TOKEN、GEMINI_API_KEY
+環境變數（必需）：
+  TELEGRAM_BOT_TOKEN  — 你的 Bot Token
+  GEMINI_API_KEY      — Google AI API Key
+  VIDEO_DIR           — 掃描影片的資料夾（預設: ~/Videos）
 """
 
 import os
 import sys
 import json
 import time
-import hashlib
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
-# ─── 設定 ──────────────────────────────────────────────
-BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN", "貼上你的Token")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "貼上你的Gemini_API_Key")
-CHAT_ID_FILE   = os.path.join(os.path.dirname(__file__), "chat_id.conf")
-DATA_DIR       = os.path.join(os.path.dirname(__file__), "data")
-
-# 影片搜索路徑
-VIDEO_SEARCH_PATHS = [
-    "/c/Users/master/Downloads",
-    "/c/Users/master/Desktop",
-    "/c/Users/master/Videos/Captures",
-]
+# ─── 配置 ──────────────────────────────────────────────
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "PLACEHOLDER")
+VIDEO_DIR = os.getenv(
+    "VIDEO_DIR",
+    str(Path.home() / "Downloads")   # fallback: 每個 OS 的 home/Downloads
+)
+CHAT_ID_FILE = Path(__file__).parent / "chat_id.conf"
+STATE_FILE = Path(__file__).parent / "state.json"
 
 try:
     import telebot
     from google import genai
-except ImportError:
-    print("❌ 缺少依賴套件，請執行：pip install -r requirements.txt")
+except ImportError as e:
+    print(f"❌ 缺少套件：{e}")
+    print("請執行：pip install -r requirements.txt")
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY != "貼上你的Gemini_API_Key" else None
+client = None
+if GEMINI_API_KEY and GEMINI_API_KEY != "PLACEHOLDER":
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+# 每組 Chat ID 的對話歷史（最多保留最近 6 則）
+CHAT_MEMORY: dict[int, list[dict]] = {}
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_state(state: dict):
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
 # ─── 工具函數 ──────────────────────────────────────────
-def get_latest_video():
-    """找到最新的 .mp4 影片"""
+def get_latest_video() -> tuple[str | None, str | None, float | None]:
+    """返回 (path, date_str, size_mb) 或全 None"""
+    dir_path = Path(VIDEO_DIR)
+    if not dir_path.is_dir():
+        return None, None, None
+
     candidates = []
-    for base in VIDEO_SEARCH_PATHS:
-        if not os.path.isdir(base):
-            continue
+    for f in dir_path.rglob("*.mp4"):
         try:
-            for root, _, files in os.walk(base):
-                for f in files:
-                    if f.lower().endswith(".mp4"):
-                        full = os.path.join(root, f)
-                        mtime = os.path.getmtime(full)
-                        size  = os.path.getsize(full)
-                        candidates.append((mtime, full, size))
-        except PermissionError:
+            stat = f.stat()
+            candidates.append((stat.st_mtime, str(f), stat.st_size))
+        except OSError:
             continue
+
     if not candidates:
         return None, None, None
+
     candidates.sort(key=lambda x: x[0], reverse=True)
     mtime, path, size = candidates[0]
     dt = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-    return path, dt, size
+    return path, dt, round(size / 1024 / 1024, 1)
 
 
-def save_chat_id(chat_id):
-    """持久化 Chat ID"""
-    with open(CHAT_ID_FILE, "w", encoding="utf-8") as f:
-        f.write(f"# Auto-detected Chat ID\n{chat_id}\n")
-    print(f"[INFO] Chat ID {chat_id} 寫入 {CHAT_ID_FILE}")
+def save_chat_id(chat_id: int):
+    CHAT_ID_FILE.write_text(f"{chat_id}\n", encoding="utf-8")
 
 
-def call_gemini(prompt: str, chat_history=None) -> str:
-    """
-    調用 Gemini API（含 Google 搜尋）回覆使用者訊息
-    使用 google-search-results 插件模式（Gemini 1.5 Pro+ 支援联网搜尋）
-    """
+def call_gemini(prompt: str, chat_id: int) -> str:
+    """調用 Gemini 聯網搜尋並回傳摘要"""
     if client is None:
-        return "⚠️ Gemini API Key 未設定，請配置 GEMINI_API_KEY 環境變數後重啟 Bot。"
+        return "⚠️ Gemini API Key 尚未設定，請檢查環境變數 GEMINI_API_KEY。"
+
+    # 取得或建立此 chat 的歷史
+    if chat_id not in CHAT_MEMORY:
+        CHAT_MEMORY[chat_id] = []
+    history = CHAT_MEMORY[chat_id]
+
+    # 限制歷史長度
+    history.append({"role": "user", "parts": [prompt]})
+    if len(history) > 12:
+        history[:] = history[-10:]
 
     try:
-        # 構建有歷史上下文的多輪對話
-        messages = []
-        if chat_history:
-            for h in chat_history[-6:]:  # 保留最近 3 輪對話
-                role = "user" if h["role"] == "user" else "model"
-                messages.append({"role": role, "parts": [h["content"]]})
-        messages.append({"role": "user", "parts": [prompt]})
-
-        # 使用生成內容 API，开启 thinking mode 支援推理
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=messages,
+        # 使用 generation config 啟用網路搜尋（Gemini 1.5 Pro / Flash 支援）
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=history,
             config=genai.types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=2048,
-                tools=[{"google_search": {}}],  # 啟用網路搜尋
+                tools=[{"google_search": {}}],
+                temperature=0.3,
+                max_output_tokens=1500,
             ),
         )
-
-        text = response.text.strip()
-        if not text:
-            text = "（Gemini 未返回有效內容，請稍後重試）"
-        return text
-
+        text = resp.text.strip() if resp.text else ""
+        if text:
+            history.append({"role": "model", "parts": [text]})
+        return text or "⚠️ Gemini 沒有回傳有效內容，請重試。"
     except Exception as e:
-        error_msg = str(e)
-        if "API key" in error_msg.lower() or "authentication" in error_msg.lower():
-            return "❌ Gemini API 驗證失敗，請檢查 GEMINI_API_KEY 是否正確。"
-        return f"⚠️ 查詢時發生錯誤：{error_msg[:120]}"
+        err = str(e)[:200]
+        return f"⚠️ Gemini 呼叫失敗：{err}"
+
+
+def handle_publish(message) -> bool:
+    """處理「發布影片」指令，回傳 True 表示已回應"""
+    video_path, video_date, video_size = get_latest_video()
+    if video_path is None:
+        bot.reply_to(message,
+            "❌ 找不到任何 .mp4 影片。\n"
+            "請把影片放到以下資料夾後再發送「發布影片」：\n"
+            f"  `{VIDEO_DIR}`"
+        )
+        return True
+
+    # 寫入待發布狀態
+    state = load_state()
+    state["last_published"] = datetime.now().isoformat()
+    state["latest_video"] = {
+        "path": video_path,
+        "date": video_date,
+        "size_mb": video_size,
+    }
+    save_state(state)
+
+    reply = (
+        f"🎬 影片已找到！\n\n"
+        f"📁 路徑：`{video_path}`\n"
+        f"📦 大小：{video_size} MB\n"
+        f"🕐 時間：{video_date}\n\n"
+        f"✅ 已標記為待發布，準備上傳中…"
+    )
+    bot.reply_to(message, reply)
+    return True
+
+
+def handle_question(message, text: str) -> bool:
+    """由 Gemini 回答，回傳 True 表示已回應"""
+    chat_id = message.chat.id
+    reply = call_gemini(text, chat_id)
+    bot.reply_to(message, reply)
+    return True
 
 
 # ─── 消息處理器 ────────────────────────────────────────
-# 簡單的聊天記憶（按 chat_id 存儲最近對話）
-CHAT_MEMORY = {}
-
-
-@bot.message_handler(func=lambda m: True)
+@bot.message_handler(func=lambda message: True)
 def handle_all(message):
-    chat_id   = message.chat.id
-    user_id   = message.from_user.id
-    username  = message.from_user.username or "?"
-    text      = (message.text or "").strip()
+    chat_id = message.chat.id
+    username = (message.from_user.username or "?")
+    text = (message.text or "").strip()
 
-    # 持久化 Chat ID
+    if not text:
+        return  # 忽略非文字訊息（圖片、 sticker 等）
+
     save_chat_id(chat_id)
 
     print(f"\n{'='*55}")
-    print(f"📨 收到 | Chat={chat_id} @{username}")
-    print(f"   內容: {text[:100]}")
+    print(f"📨 來自 @{username} (Chat ID: {chat_id})")
+    print(f"   內容: {text[:120]}")
     print(f"{'='*55}")
 
-    if text == "發布影片":
-        video_path, video_date, video_size = get_latest_video()
-        if video_path:
-            size_mb = round(video_size / 1024 / 1024, 1)
-            # 寫入待發布狀態檔（Render 部署後可透過 Webhook 觸發實際上傳）
-            pending_file = os.path.join(DATA_DIR, "pending_publish.json")
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(pending_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "chat_id":    chat_id,
-                    "video_path": video_path,
-                    "size_mb":    size_mb,
-                    "date":       video_date,
-                    "status":     "queued",
-                }, f, ensure_ascii=False, indent=2)
-            reply = (
-                f"🎬 找到最新影片！\n\n"
-                f"📁 路徑：{video_path}\n"
-                f"📦 大小：{size_mb} MB\n"
-                f"🕐 時間：{video_date}\n\n"
-                f"✅ 已加入待發布隊列（ Render 啟動後自動觸發上傳抖音 ）"
-            )
-        else:
-            reply = "❌ 找不到任何 .mp4 檔案。\n請把影片放到以下任一資料夾後再發送『發布影片』：\n" \
-                    "• ~/Downloads\n• ~/Desktop\n• ~/Videos/Captures"
-        bot.reply_to(message, reply)
-        return
-
-    # 一般問題 → Gemini 上網搜尋回覆
-    if chat_id not in CHAT_MEMORY:
-        CHAT_MEMORY[chat_id] = []
-
-    history = CHAT_MEMORY[chat_id]
-    ai_reply = call_gemini(text, history)
-
-    # 記錄對話歷史（僅用於上下文，不發回給用戶）
-    history.append({"role": "user", "content": text})
-    history.append({"role": "model", "content": ai_reply})
-    if len(history) > 20:
-        CHAT_MEMORY[chat_id] = history[-10:]
-
-    bot.reply_to(message, ai_reply)
+    if text == "發布影片" or text == "发布视频" or text.lower() in ("publish video", "upload video"):
+        handle_publish(message)
+    elif text:
+        handle_question(message, text)
 
 
-# ─── 健康檢查端點（Render HTTP 健康探針） ───────────
-def health_check():
-    """Render 需要一個 HTTP 回應來判斷服務是否正常"""
-    import http.server
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        def log_message(self, format, *args):
-            pass
-    server = http.server.HTTPServer(("0.0.0.0", int(os.getenv("PORT", 5000))), Handler)
-    print("[HEALTH] 健康檢查端點監聽於 PORT=" + os.getenv("PORT", "5000"))
-    server.serve_forever()
-
-
-# ─── 主程式 ──────────────────────────────────────────
+# ─── 啟動 ──────────────────────────────────────────────
 if __name__ == "__main__":
-    # 確保資料目錄存在
-    os.makedirs(DATA_DIR, exist_ok=True)
+    if not BOT_TOKEN:
+        print("❌ 錯誤：請設定環境變數 TELEGRAM_BOT_TOKEN")
+        print("   範例：export TELEGRAM_BOT_TOKEN='123456:AABBCC...'")
+        sys.exit(1)
 
     # 驗證 Token
     print("⏳ 驗證 Bot Token …")
     try:
         me = bot.get_me()
-        print(f"✅ Bot：@{me.username} ({me.first_name})  ID: {me.id}")
-    except Exception as e:
+        print(f"✅ 驗證成功！Bot：@{me.username} ({me.first_name})")
+    except telebot.apihelper.ApiException as e:
         print(f"❌ Token 驗證失敗：{e}")
         sys.exit(1)
 
-    # 驗證 Gemini
-    gemini_ready = client is not None
-    print(f"{'✅' if gemini_ready else '⚠️ '} Gemini API：{'就緒' if gemini_ready else '未設定（查看 README）'}")
+    # 顯示 Gemini 狀態
+    gemini_status = "✅ 就緒" if client else "⚠️ 未設定（僅影片功能可用）"
+    print(f"   Gemini API : {gemini_status}")
 
-    # 讀取 Chat ID
-    if os.path.exists(CHAT_ID_FILE):
-        with open(CHAT_ID_FILE, "r") as f:
-            line = f.read().strip()
-            if line and not line.startswith("#"):
-                print(f"💬 已知 Chat ID：{line}")
+    # 讀取已知 Chat ID
+    if CHAT_ID_FILE.exists():
+        saved_id = CHAT_ID_FILE.read_text().strip()
+        if saved_id.isdigit():
+            print(f"   已知 Chat ID: {saved_id}")
 
-    print("\n⏳ 啟動輪詢，等待手機傳訊 …")
-    print("   👉 在 Telegram 找 @" + me.username + "，發任意訊息即可\n")
-    print("   🎬 發「發布影片」→ 自動找最新 mp4 並標記待發布")
-    print("   💬 發任何問題  → Gemini 聯網搜尋後回覆\n")
-
-    # Render 部署時會指定 PORT，否則用 polling 模式
-    if os.getenv("RENDER"):
-        import threading
-        t = threading.Thread(target=health_check, daemon=True)
-        t.start()
+    print(f"\n   影片目錄 : {VIDEO_DIR}")
+    print(f"   狀態檔案 : {STATE_FILE}")
+    print()
+    print("⏳ 啟動輪詢，等待你的手機傳訊 …")
+    print("   💬 發任意問題 → Gemini 上網搜尋回覆")
+    print("   🎬 發「發布影片」→ 找最新 .mp4 並標記待發布")
+    print("   按 Ctrl+C 停止\n")
 
     try:
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
