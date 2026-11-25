@@ -1,0 +1,27 @@
+# Telegram + Gemini Bot — Render 部署配置
+# 使用方式：
+#   1. 將本專案推送到 GitHub 私人倉庫
+#   2. 到 https://render.com 登入
+#   3. New → Web Service → Connect GitHub repo
+#   4. 填入環境變數 TELEGRAM_BOT_TOKEN 與 GEMINI_API_KEY
+#   5. Deploy
+
+name: telegram-gemini-bot
+type: web
+runtime: python
+plan: free
+region: oregon
+
+build:
+  commands:
+    - pip install -r requirements.txt
+
+start: python bot.py
+
+envVars:
+  - key: TELEGRAM_BOT_TOKEN
+    required: true
+  - key: GEMINI_API_KEY
+    required: true
+  - key: RENDER
+    value: "true"
