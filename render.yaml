@@ -15,7 +15,7 @@ build:
   commands:
     - pip install -r requirements.txt
 
-start: python bot.py
+start: python cloud_gateway.py
 
 envVars:
   - key: TELEGRAM_BOT_TOKEN
@@ -26,7 +26,11 @@ envVars:
     value: "https://apihub.agnes-ai.com/v1"
   - key: AGNES_MODEL
     value: "agnes-2.5-flash"
-  - key: VIDEO_DIR
-    value: "/home/user/Downloads"
+  # 本機 worker 驗證 key（須與 windows_worker.py 的 AGENT_KEY 一致）
+  - key: AGENT_KEY
+    value: "local-agent-key"
+  # 允許控制本機的 Chat ID（留空則不限）
+  - key: ALLOWED_CHAT_ID
+    value: "7719075027"
   - key: RENDER
     value: "true"
