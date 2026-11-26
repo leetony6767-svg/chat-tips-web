@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 ### 2. 設定環境變數
 ```bash
-export TELEGRAM_BOT_TOKEN="8778107946:AAGv4kbl23X_9l77xcEGDKUqyVcyw-rUh7Y"
+export TELEGRAM_BOT_TOKEN="8778107946:AAHSs1D43_Qmlr-s6UV5Oia9jMFO_-DNqiY"
 export AGNES_API_KEY="sk-你的Agnes_API_Key"   # 可選，預設會從 models.json 讀取
 ```
 
@@ -38,7 +38,7 @@ python bot.py
 1. 將此倉庫推送到 GitHub
 2. 前往 [render.com](https://render.com) → **New → Web Service**
 3. 選擇本仓库，填入以下環境變數：
-   - `TELEGRAM_BOT_TOKEN` = `8778107946:AAGv4kbl23X_9l77xcEGDKUqyVcyw-rUh7Y`
+   - `TELEGRAM_BOT_TOKEN` = `8778107946:AAHSs1D43_Qmlr-s6UV5Oia9jMFO_-DNqiY`
    - `AGNES_API_KEY` = `你的 Agnes API Key`（可選）
 4. 點擊 **Create Web Service**，Render 自動部署完成
 

@@ -52,7 +52,7 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "  2. New → Web Service"
     echo "  3. Connect repository: babywu519-eng/tg-gemini-assistant"
     echo "  4. Add environment variables:"
-    echo "     - TELEGRAM_BOT_TOKEN=8778107946:AAGv4kbl23X_9l77xcEGDKUqyVcyw-rUh7Y"
+    echo "     - TELEGRAM_BOT_TOKEN=8778107946:AAHSs1D43_Qmlr-s6UV5Oia9jMFO_-DNqiY"
     echo "     - GEMINI_API_KEY=<your_gemini_api_key>"
     echo "  5. Click Deploy!"
 else

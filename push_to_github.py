@@ -69,7 +69,7 @@ if result.returncode == 0:
     print(f"  2. New → Web Service")
     print(f"  3. Connect GitHub repo: babywu519-eng/tg-gemini-assistant")
     print(f"  4. Add environment variables:")
-    print(f"     - TELEGRAM_BOT_TOKEN=8778107946:AAGv4kbl23X_9l77xcEGDKUqyVcyw-rUh7Y")
+    print(f"     - TELEGRAM_BOT_TOKEN=8778107946:AAHSs1D43_Qmlr-s6UV5Oia9jMFO_-DNqiY")
     print(f"     - GEMINI_API_KEY=<your_gemini_api_key>")
     print(f"  5. Deploy!")
 else:
