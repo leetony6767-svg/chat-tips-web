@@ -1,12 +1,12 @@
-# Telegram + Gemini Bot — Render 部署配置
+# Telegram + Agnes AI Bot — Render 部署配置
 # 使用方式：
 #   1. 將本專案推送到 GitHub 私人倉庫
 #   2. 到 https://render.com 登入
 #   3. New → Web Service → Connect GitHub repo
-#   4. 填入環境變數 TELEGRAM_BOT_TOKEN 與 GEMINI_API_KEY
+#   4. 填入環境變數 TELEGRAM_BOT_TOKEN 與 AGNES_API_KEY
 #   5. Deploy
 
-name: telegram-gemini-bot
+name: tg-gemini-assistant
 type: web
 runtime: python
 plan: free
@@ -21,7 +21,10 @@ start: python bot.py
 envVars:
   - key: TELEGRAM_BOT_TOKEN
     required: true
-  - key: GEMINI_API_KEY
+  - key: AGNES_API_KEY
     required: true
+    sync: false
+  - key: VIDEO_DIR
+    value: "/home/user/Downloads"
   - key: RENDER
     value: "true"
