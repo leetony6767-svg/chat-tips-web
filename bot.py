@@ -13,6 +13,19 @@ Telegram + Agnes AI 本機電腦助理 Bot
 
 import os
 import sys
+
+# ─── 強制 UTF-8 編碼（修復 Windows Console cp950 爆错）────────────
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    import io as _io
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdin  = _io.TextIOWrapper(sys.stdin.buffer,  encoding="utf-8", errors="replace")
+    sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import json
 import subprocess
 from datetime import datetime
@@ -165,6 +178,8 @@ def run_on_pc(command: str) -> str:
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             cwd=str(BASE_DIR),
         )
