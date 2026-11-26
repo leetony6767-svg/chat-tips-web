@@ -1,12 +1,11 @@
 # Telegram + Agnes AI Bot — Render 部署配置
-# 使用方式：
-#   1. 將本專案推送到 GitHub 私人倉庫
-#   2. 到 https://render.com 登入
-#   3. New → Web Service → Connect GitHub repo
-#   4. 填入環境變數 TELEGRAM_BOT_TOKEN 與 AGNES_API_KEY
-#   5. Deploy
+# 雲端獨立運行：本機電腦可關機，手機 Telegram 仍可操作並收 Agnes AI 回覆
+# 部署方式（環境變數已寫死於下方 envVars，無需手填）：
+#   1. 到 https://render.com 登入
+#   2. New → Blueprint → 選擇此 repo 的 render.yaml
+#   3. Deploy（環境變數自動套用）
 
-name: tg-gemini-assistant
+name: tg-agnes-assistant
 type: web
 runtime: python
 plan: free
@@ -20,10 +19,13 @@ start: python bot.py
 
 envVars:
   - key: TELEGRAM_BOT_TOKEN
-    required: true
+    value: "8778107946:AAHSs1D43_Qmlr-s6UV5Oia9jMFO_-DNqiY"
   - key: AGNES_API_KEY
-    required: true
-    sync: false
+    value: "sk-cRmT17Jw2tCjOBxiejiL9sLANPoP82FGzecx7FjjOSmLRgHX"
+  - key: AGNES_BASE_URL
+    value: "https://apihub.agnes-ai.com/v1"
+  - key: AGNES_MODEL
+    value: "agnes-2.5-flash"
   - key: VIDEO_DIR
     value: "/home/user/Downloads"
   - key: RENDER

@@ -44,8 +44,8 @@ BASE_DIR = Path(__file__).resolve().parent
 CHAT_ID_FILE = BASE_DIR / "chat_id.conf"
 STATE_FILE = BASE_DIR / "state.json"
 
-AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
-AGNES_MODEL = "agnes-2.5-flash"
+AGNES_BASE_URL = os.getenv("AGNES_BASE_URL", "https://apihub.agnes-ai.com/v1").strip()
+AGNES_MODEL = os.getenv("AGNES_MODEL", "agnes-2.5-flash").strip()
 
 # 阻擋明顯高風險的破壞性指令
 BLOCKED_KEYWORDS = [
