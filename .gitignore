@@ -11,3 +11,8 @@ chat_id.conf
 state.json
 bot_commands.jsonl
 .workbuddy-ai/
+# 持久化隊列 SQLite（runtime 產物，勿提交）
+*.db
+*.db-wal
+*.db-shm
+jobs.db

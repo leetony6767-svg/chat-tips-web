@@ -26,8 +26,9 @@ import sys
 import io
 import json
 import base64
-import queue
+import sqlite3
 import threading
+import time
 from datetime import datetime
 
 # ─── 強制 UTF-8 ─────────────────────────────────────────────
@@ -95,25 +96,150 @@ def tg_send_photo(chat_id, image_b64, caption, reply_to=None):
 def is_authorized(chat_id):
     return (not ALLOWED_CHAT_ID) or (str(chat_id) == ALLOWED_CHAT_ID)
 
-# ─── 控制隊列（本機 worker 出向取走） ─────────────────────
-JOB_QUEUE: "queue.Queue" = queue.Queue()
-JOB_COUNTER = {"n": 0}
-JOB_LOCK = threading.Lock()
+# ─── 持久化控制隊列（SQLite；本機 worker 出向取走） ────────
+# 目的：Render 休眠/重啟後，排中與已 claim 未完成的控制指令不會被清空，
+#       開機/重啟後本機 worker 出向長輪詢可把「之前累積」的指令取走補執行。
+DB_FILE = os.environ.get("JOB_DB_FILE", "jobs.db").strip()
+DB_PATH = DB_FILE if os.path.isabs(DB_FILE) else os.path.join(os.getcwd(), DB_FILE)
+DB_LOCK = threading.Lock()
+# claim 後未回傳 result 的 job，逾時後自動排回 pending（防 worker 崩潰卡住）
+CLAIM_TTL_SEC = int(os.environ.get("JOB_CLAIM_TTL_SEC", "180"))
+# 已完成的 job 保留天數（純空間整理用；超過才刪）
+DONE_KEEP_DAYS = int(os.environ.get("JOB_DONE_KEEP_DAYS", "7"))
+
+def _connect():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+import contextlib
+@contextlib.contextmanager
+def db():
+    """取得 DB 鎖 + 連線，保證關閉（sqlite3 的 with 只 commit 不 close，會洩漏）。"""
+    conn = _connect()
+    with DB_LOCK:
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+def _init_db():
+    with db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS jobs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT UNIQUE NOT NULL,
+            kind TEXT NOT NULL,
+            arg TEXT NOT NULL DEFAULT '',
+            chat_id TEXT,
+            message_id TEXT,
+            source TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created TEXT,
+            claimed_at TEXT,
+            done_at TEXT
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+
+_init_db()
+
+def _next_job_id():
+    with db() as conn:
+        row = conn.execute("SELECT MAX(id) AS m FROM jobs").fetchone()
+        return (row["m"] or 0) + 1
 
 def enqueue_job(kind, arg, chat_id, message_id, source):
-    with JOB_LOCK:
-        JOB_COUNTER["n"] += 1
-        job_id = f"job-{JOB_COUNTER['n']}"
-    JOB_QUEUE.put({
-        "job_id": job_id,
-        "kind": kind,
-        "arg": arg,
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "source": source,
-        "created": datetime.now().isoformat(),
-    })
+    """寫入 jobs 表（持久化），回傳 job_id。"""
+    job_id = f"job-{_next_job_id()}"
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO jobs(job_id,kind,arg,chat_id,message_id,source,status,created)"
+            " VALUES(?,?,?,?,?,?, 'pending', ?)",
+            (job_id, kind, arg, str(chat_id), str(message_id) if message_id is not None else "",
+             source, datetime.now().isoformat()))
     return job_id
+
+def _stale_to_pending():
+    """把 claim 後逾時未回傳的 job 排回 pending（worker 崩潰兜底）。"""
+    if CLAIM_TTL_SEC <= 0:
+        return
+    cutoff = (time.time() - CLAIM_TTL_SEC)
+    with db() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='pending', claimed_at=NULL"
+            " WHERE status='claimed' AND claimed_at < ?",
+            (datetime.fromtimestamp(cutoff).isoformat(),))
+
+def _purge_old_done():
+    """刪除過舊的 done 記錄（純空間整理）。"""
+    if DONE_KEEP_DAYS <= 0:
+        return
+    cutoff = (datetime.now().timestamp() - DONE_KEEP_DAYS * 86400)
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM jobs WHERE status='done' AND COALESCE(done_at, created) < ?",
+            (datetime.fromtimestamp(cutoff).isoformat(),))
+
+def _claim_one():
+    """原子取一個 pending job → claimed，回 dict；沒有回 None。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE status='pending' ORDER BY id ASC LIMIT 1").fetchone()
+        if not row:
+            return None
+        now = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE jobs SET status='claimed', claimed_at=? WHERE id=? AND status='pending'",
+            (now, row["id"]))
+        if conn.total_changes == 0:  # 被其他 poller 搶走
+            return None
+        return {k: row[k] for k in row.keys() if k != "id"}
+
+def job_from_row(row):
+    """把 sqlite.Row 轉成 worker 端期望的 job dict。"""
+    d = {k: row[k] for k in row.keys() if k not in ("id", "status", "claimed_at", "done_at")}
+    d["job_id"] = row["job_id"]
+    return d
+
+def poll_job(timeout):
+    """長輪詢：先回收逾時 job，再取一個 pending；取不到就睡到 timeout。"""
+    deadline = time.time() + max(1, min(timeout, 55))
+    _stale_to_pending()
+    while True:
+        row = _claim_one()
+        if row:
+            return job_from_row(row)
+        if time.time() >= deadline:
+            return None
+        time.sleep(min(1.5, max(0.2, deadline - time.time())))
+
+def mark_done(job_id):
+    """result 端點：把 job 標記 done 並記時間。"""
+    with db() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='done', done_at=? WHERE job_id=?",
+            (datetime.now().isoformat(), job_id))
+
+def pending_count():
+    with db() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE status='pending'").fetchone()["c"]
+
+# 定期清理線程：回收逾時 claim + 清除過舊 done（防 DB 無限增大）
+def _db_maintenance_loop():
+    while True:
+        try:
+            _stale_to_pending()
+            _purge_old_done()
+        except Exception as e:
+            print(f"[DB-MAINT] 維護失敗：{e}", flush=True)
+        time.sleep(60)
+
+threading.Thread(target=_db_maintenance_loop, daemon=True, name="db-maint").start()
 
 def call_agnes(text, chat_id):
     if agnes_client is None:
@@ -210,11 +336,10 @@ def worker_poll():
         timeout = int(request.args.get("timeout", "25"))
     except ValueError:
         timeout = 25
-    try:
-        job = JOB_QUEUE.get(block=True, timeout=min(timeout, 55))
-    except queue.Empty:
+    job = poll_job(timeout)
+    if job is None:
         return jsonify({"jobs": []})
-    JOB_QUEUE.task_done()
+    print(f"[POLL] 交出 {job.get('job_id')} {job.get('kind')!r}", flush=True)
     return jsonify({"jobs": [job]})
 
 @app.route("/worker/result", methods=["POST"])
@@ -228,6 +353,8 @@ def worker_result():
     message_id = data.get("message_id") or job.get("message_id")
     text = data.get("text", "")
     image_b64 = data.get("image_b64")
+    # 標記完成（持久化；讓逾時回收不會重排這筆）
+    mark_done(data.get("job_id") or job.get("job_id"))
 
     if image_b64:
         tg_send_photo(chat_id, image_b64, text[:1000], reply_to=message_id)
@@ -236,6 +363,27 @@ def worker_result():
     print(f"[RESULT] job={data.get('job_id')} 回傳 {len(text)} 字" +
           (" + 圖片" if image_b64 else ""), flush=True)
     return jsonify({"ok": True})
+
+
+@app.route("/jobs", methods=["GET"])
+def jobs_status():
+    """運維端點：顯示目前隊列狀態。參數 limit（預設 20）。"""
+    if request.headers.get("X-Agent-Key") != AGENT_KEY:
+        return jsonify({"error": "bad-key"}), 401
+    limit = int(request.args.get("limit", "20"))
+    _stale_to_pending()
+    with db() as conn:
+        counts = {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")}
+        rows = conn.execute(
+            "SELECT job_id,kind,arg,status,created,claimed_at,done_at FROM jobs"
+            " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return jsonify({
+        "db": DB_PATH,
+        "counts": counts,
+        "pending": pending_count(),
+        "recent": [dict(r) for r in rows],
+    })
 
 
 def setup_webhook():
@@ -259,6 +407,8 @@ def main():
     print(f"🧠 Agnes: {'就緒' if agnes_client else '未設定'} ({AGNES_MODEL})", flush=True)
     print(f"🌐 Webhook 目標：{CLOUD_BASE_URL}/telegram-webhook", flush=True)
     print(f"🔑 AGENT_KEY 已設定（worker 驗證用）", flush=True)
+    print(f"💾 持久化隊列 SQLite：{DB_PATH}  (claim 逾時={CLAIM_TTL_SEC}s, done 保留={DONE_KEEP_DAYS}天)", flush=True)
+    print(f"   目前待處理控制指令：{pending_count()} 筆", flush=True)
 
     setup_webhook()
 
