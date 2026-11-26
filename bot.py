@@ -22,14 +22,18 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    sys.stdin  = _io.TextIOWrapper(sys.stdin.buffer,  encoding="utf-8", errors="replace")
-    sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    sys.stdin  = _io.TextIOWrapper(sys.stdin.buffer,  encoding="utf-8", errors="replace", write_through=True)
+    sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", write_through=True)
+    sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", write_through=True)
 
 import json
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
+
+IS_RENDER = os.getenv("RENDER", "").lower() in ("1", "true", "yes")
+PORT = int(os.getenv("PORT", "8080"))
 
 # ─── 配置 ──────────────────────────────────────────────
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -298,13 +302,43 @@ if __name__ == "__main__":
         print(f"✅ Bot 已連線：@{me.username} ({me.first_name})")
     except Exception as e:
         print(f"❌ Token 驗證失敗：{e}")
-        sys.exit(1)
+        if IS_RENDER:
+            sys.exit(1)
 
     print(f"📁 影片目錄：{VIDEO_DIR}")
     print(f"🔐 授權 Chat ID：{ALLOWED_CHAT_ID or '未限制（建議設定）'}")
-    print("⏳ 開始監聽 Telegram 指令（直接在本機執行）...")
 
-    try:
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
-    except KeyboardInterrupt:
-        print("\n👋 已停止。")
+    # ── Telegram 長輪詢放背景執行緒 ────────────────────
+    def _run_telegram():
+        print("⏳ 啟動 Telegram 長輪詢（背景執行緒）…")
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except KeyboardInterrupt:
+            print("\n👋 已停止。")
+
+    tg_thread = threading.Thread(target=_run_telegram, name="telegram-polling", daemon=True)
+    tg_thread.start()
+
+    if IS_RENDER:
+        # Render Web Service 必須有 HTTP 伺服器監聽 $PORT，否則健康檢查失敗會被重啟
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class _HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = "tg-agnes-bot: ok".encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # 靜音
+
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), _HealthHandler)
+        print(f"🌐 Render 健康檢查伺服器監聽 http://0.0.0.0:{PORT}")
+        server.serve_forever()
+    else:
+        # 本機模式：直接在前台跑 Telegram 輪詢
+        print("⏳ 本機模式：直接監聽 Telegram 指令…")
+        tg_thread.join()
