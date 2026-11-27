@@ -68,9 +68,12 @@ AGNES_SYSTEM = "你是全能私人助理，請以繁體中文簡潔、直接、�
 
 # ─── Telegram 低層輔助（用 requests 直打，避免多入口） ──────
 def tg(method, **params):
-    """呼叫 Telegram Bot API（非 webhook 相關），回 JSON dict。"""
-    if method == "getUpdates":
-        raise RuntimeError("本程式禁止 getUpdates（會與本機端衝突）")
+    """呼叫 Telegram Bot API（非 webhook 相關），回 JSON dict。
+
+    注意：getUpdates 只能在「webhook 已被暫時移除」的窗口內使用
+    （見 reclaim_offline_updates）；webhook 生效時 getUpdates 會回 409。
+    本機 worker 已改做出向 HTTP 輪詢，不使用 getUpdates，故無搶 update 衝突。
+    """
     r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
                     params=params, timeout=30)
     return r.json()
@@ -141,26 +144,40 @@ def _init_db():
             status TEXT NOT NULL DEFAULT 'pending',
             created TEXT,
             claimed_at TEXT,
-            done_at TEXT
+            done_at TEXT,
+            update_id TEXT
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        # 既有 DB 補欄（CREATE IF NOT EXISTS 不會為舊表加新欄；加不成就忽略）
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN update_id TEXT")
+        except Exception:
+            pass
 
 _init_db()
+
+def _has_update(update_id):
+    """同 update_id 是否已入過隊列（reclaim 去重用）。"""
+    if not update_id:
+        return False
+    with db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM jobs WHERE update_id=? LIMIT 1", (str(update_id),)).fetchone() is not None
 
 def _next_job_id():
     with db() as conn:
         row = conn.execute("SELECT MAX(id) AS m FROM jobs").fetchone()
         return (row["m"] or 0) + 1
 
-def enqueue_job(kind, arg, chat_id, message_id, source):
-    """寫入 jobs 表（持久化），回傳 job_id。"""
+def enqueue_job(kind, arg, chat_id, message_id, source, update_id=None):
+    """寫入 jobs 表（持久化），回傳 job_id。update_id 用於 reclaim 去重。"""
     job_id = f"job-{_next_job_id()}"
     with db() as conn:
         conn.execute(
-            "INSERT INTO jobs(job_id,kind,arg,chat_id,message_id,source,status,created)"
-            " VALUES(?,?,?,?,?,?, 'pending', ?)",
+            "INSERT INTO jobs(job_id,kind,arg,chat_id,message_id,source,status,created,update_id)"
+            " VALUES(?,?,?,?,?,?, 'pending', ?, ?)",
             (job_id, kind, arg, str(chat_id), str(message_id) if message_id is not None else "",
-             source, datetime.now().isoformat()))
+             source, datetime.now().isoformat(), str(update_id) if update_id is not None else None))
     return job_id
 
 def _stale_to_pending():
@@ -201,7 +218,8 @@ def _claim_one():
 
 def job_from_row(row):
     """把 sqlite.Row 轉成 worker 端期望的 job dict。"""
-    d = {k: row[k] for k in row.keys() if k not in ("id", "status", "claimed_at", "done_at")}
+    d = {k: row[k] for k in row.keys()
+         if k not in ("id", "status", "claimed_at", "done_at", "update_id")}
     d["job_id"] = row["job_id"]
     return d
 
@@ -296,6 +314,7 @@ def health():
 def webhook():
     """Telegram webhook 入口。"""
     update = request.get_json(force=True, silent=True) or {}
+    update_id = update.get("update_id")
     msg = update.get("message") or {}
     text = (msg.get("text") or "").strip()
     chat_id = (msg.get("chat") or {}).get("id")
@@ -311,9 +330,12 @@ def webhook():
 
     matched = _classify_kind(text)
     if matched:
-        # 控制本機 → 入隊列
+        # 控制本機 → 入隊列（以 update_id 去重，避免與 getUpdates 補抓重複入隊）
+        if _has_update(update_id):
+            print(f"[WEBHOOK] update {update_id} 已入過隊列，跳過", flush=True)
+            return jsonify({"ok": True, "dup": update_id})
         kind, arg = matched
-        job_id = enqueue_job(kind, arg, chat_id, message_id, "telegram")
+        job_id = enqueue_job(kind, arg, chat_id, message_id, "telegram", update_id=update_id)
         tg_send(chat_id,
                 f"⏳ 已把「{kind}」送給本機執行（{job_id}）。\n"
                 f"本機在線時會稍候回覆結果；離線時會一直等待。",
@@ -400,6 +422,58 @@ def setup_webhook():
     print(f"[WEBHOOK] setWebhook -> {url}  ok={d.get('ok')} {d.get('description','')}", flush=True)
 
 
+def reclaim_offline_updates():
+    """喚起/重啟後，把「離線期間堆在 Telegram、未被 webhook 收走」的控制指令
+    補抓並入隊列，讓本機 worker 上線後自動補抓執行（免費、跨重啟不遺失）。
+
+    原理：webhook 生效時 getUpdates 會回 409，所以先 deleteWebhook（保留 pending）
+    → 用 getUpdates 讀出離線堆積的 update → 控制指令入 SQLite 隊列（update_id 去重）
+    → 最後 setWebhook 恢復。setWebhook 放 finally，確保即使補抓中途出錯也能恢復
+    webhook，不會卡在「webhook 已刪、收不到新訊息」的死鎖。
+    """
+    url = f"{CLOUD_BASE_URL}/telegram-webhook"
+    reclaimed = 0
+    try:
+        # 1) 暫時移除 webhook（保留堆積的 pending updates）
+        del_d = tg("deleteWebhook", drop_pending_updates=False)
+        print(f"[RECLAIM] deleteWebhook ok={del_d.get('ok')}", flush=True)
+        # 2) 讀出離線堆積的 update（非阻塞）
+        upd = tg("getUpdates", timeout=0, limit=200)
+        updates = upd.get("result") or []
+        for u in updates:
+            mid = u.get("update_id")
+            msg = u.get("message") or {}
+            text = (msg.get("text") or "").strip()
+            chat_id = (msg.get("chat") or {}).get("id")
+            message_id = msg.get("message_id")
+            if not text or not is_authorized(chat_id):
+                continue
+            matched = _classify_kind(text)
+            if not matched:
+                continue                      # 非控制指令不補抓（離線問答由 Agnes 現場答）
+            if _has_update(mid):
+                continue                      # 已入過隊列，去重
+            kind, arg = matched
+            jid = enqueue_job(kind, arg, chat_id, message_id, "reclaim", update_id=mid)
+            reclaimed += 1
+            print(f"[RECLAIM] 補抓 {jid} ← update {mid} {kind!r} {arg!r} -> chat {chat_id}", flush=True)
+        print(f"[RECLAIM] 補抓完成，新增 {reclaimed} 筆離線控制指令", flush=True)
+    except Exception as e:
+        print(f"[RECLAIM] 補抓過程出錯（不影響恢復 webhook）：{e}", flush=True)
+    finally:
+        # 3) 一定要恢復 webhook，否則收不到後續新訊息
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                            params={"url": url, "drop_pending_updates": "false"},
+                            timeout=30)
+            d = r.json()
+            print(f"[RECLAIM] setWebhook 恢復 ok={d.get('ok')} {d.get('description','')}", flush=True)
+        except Exception as e:
+            print(f"[RECLAIM] ⚠️ setWebhook 恢復失敗，3 秒後再試：{e}", flush=True)
+            threading.Timer(3.0, setup_webhook).start()
+    return reclaimed
+
+
 def main():
     global BOT_TOKEN
     if not BOT_TOKEN:
@@ -414,10 +488,13 @@ def main():
     print(f"💾 持久化隊列 SQLite：{DB_PATH}  (claim 逾時={CLAIM_TTL_SEC}s, done 保留={DONE_KEEP_DAYS}天)", flush=True)
     print(f"   目前待處理控制指令：{pending_count()} 筆", flush=True)
 
+    # 先立即恢復 webhook（讓服務先能收新訊息）
     setup_webhook()
 
-    # 啟動後 3 秒再校正一次 webhook（避免冷啟動時 URL 未就緒）
-    threading.Timer(3.0, lambda: setup_webhook()).start()
+    # 再背景補抓「離線期間堆在 Telegram、未被收走」的控制指令（跨休眠/重啟不遺失）。
+    # 放背景執行：reclaim 會短暫 deleteWebhook→getUpdates→setWebhook，
+    # 避免阻擋 Render 健康檢查；它結束時會自行恢復 webhook。
+    threading.Thread(target=reclaim_offline_updates, name="reclaim", daemon=True).start()
 
     print(f"🌐 啟動 HTTP 伺服器 http://0.0.0.0:{PORT}", flush=True)
     app.run(host="0.0.0.0", port=PORT, threaded=True)
