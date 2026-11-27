@@ -387,10 +387,14 @@ def jobs_status():
 
 
 def setup_webhook():
-    """啟動時把 Telegram 指向本 service 的 /telegram-webhook。"""
+    """啟動時把 Telegram 指向本 service 的 /telegram-webhook。
+
+    drop_pending_updates=false：保留 Render 休眠/重啟期間堆積在 Telegram 的
+    update（例如離線時傳的 /shot），避免每次喚起就被主動清掉。
+    """
     url = f"{CLOUD_BASE_URL}/telegram-webhook"
     r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                     params={"url": url, "drop_pending_updates": "true"},
+                     params={"url": url, "drop_pending_updates": "false"},
                      timeout=30)
     d = r.json()
     print(f"[WEBHOOK] setWebhook -> {url}  ok={d.get('ok')} {d.get('description','')}", flush=True)
