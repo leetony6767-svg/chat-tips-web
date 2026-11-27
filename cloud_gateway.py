@@ -153,11 +153,20 @@ def _init_db():
             conn.execute("ALTER TABLE jobs ADD COLUMN update_id TEXT")
         except Exception:
             pass
+        # 原子去重：同一 update_id 只允許存在「一筆未刪除」的 job（NULL 不受限）。
+        # 讓「webhook 路徑」與「離線補抓路徑」對同一條指令的競態，由 DB 唯一約束擋下，
+        # 結構性保證同一條離線指令絕不被重複入隊執行。
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_update_id "
+                "ON jobs(update_id) WHERE update_id IS NOT NULL")
+        except Exception:
+            pass
 
 _init_db()
 
 def _has_update(update_id):
-    """同 update_id 是否已入過隊列（reclaim 去重用）。"""
+    """同 update_id 是否已入過隊列（reclaim 去重用；DB 唯一約束是真正的兜底）。"""
     if not update_id:
         return False
     with db() as conn:
@@ -170,15 +179,24 @@ def _next_job_id():
         return (row["m"] or 0) + 1
 
 def enqueue_job(kind, arg, chat_id, message_id, source, update_id=None):
-    """寫入 jobs 表（持久化），回傳 job_id。update_id 用於 reclaim 去重。"""
+    """寫入 jobs 表（持久化），回傳 job_id；若同 update_id 已入過隊列回傳 None（去重）。
+
+    原子性：以 DB 唯一索引 uq_jobs_update_id 擋住競態——若同一 update_id 已被
+    （另一條路徑）插入，INSERT 會拋 IntegrityError，我們視為「已存在、跳過」，
+    回傳 None。呼叫端須檢查回傳值。
+    """
     job_id = f"job-{_next_job_id()}"
     with db() as conn:
-        conn.execute(
-            "INSERT INTO jobs(job_id,kind,arg,chat_id,message_id,source,status,created,update_id)"
-            " VALUES(?,?,?,?,?,?, 'pending', ?, ?)",
-            (job_id, kind, arg, str(chat_id), str(message_id) if message_id is not None else "",
-             source, datetime.now().isoformat(), str(update_id) if update_id is not None else None))
-    return job_id
+        try:
+            conn.execute(
+                "INSERT INTO jobs(job_id,kind,arg,chat_id,message_id,source,status,created,update_id)"
+                " VALUES(?,?,?,?,?,?, 'pending', ?, ?)",
+                (job_id, kind, arg, str(chat_id), str(message_id) if message_id is not None else "",
+                 source, datetime.now().isoformat(), str(update_id) if update_id is not None else None))
+            return job_id
+        except sqlite3.IntegrityError:
+            # 同 update_id 已存在（競態或重複），跳過以免重複執行
+            return None
 
 def _stale_to_pending():
     """把 claim 後逾時未回傳的 job 排回 pending（worker 崩潰兜底）。"""
@@ -330,12 +348,13 @@ def webhook():
 
     matched = _classify_kind(text)
     if matched:
-        # 控制本機 → 入隊列（以 update_id 去重，避免與 getUpdates 補抓重複入隊）
-        if _has_update(update_id):
-            print(f"[WEBHOOK] update {update_id} 已入過隊列，跳過", flush=True)
-            return jsonify({"ok": True, "dup": update_id})
+        # 控制本機 → 入隊列（DB 唯一索引 uq_jobs_update_id 擋競態：
+        # 若同 update_id 已被「離線補抓」路徑插入，enqueue_job 會回 None）
         kind, arg = matched
         job_id = enqueue_job(kind, arg, chat_id, message_id, "telegram", update_id=update_id)
+        if job_id is None:
+            print(f"[WEBHOOK] update {update_id} 已入過隊列（DB 唯一約束擋下），跳過", flush=True)
+            return jsonify({"ok": True, "dup": update_id})
         tg_send(chat_id,
                 f"⏳ 已把「{kind}」送給本機執行（{job_id}）。\n"
                 f"本機在線時會稍候回覆結果；離線時會一直等待。",
@@ -451,10 +470,10 @@ def reclaim_offline_updates():
             matched = _classify_kind(text)
             if not matched:
                 continue                      # 非控制指令不補抓（離線問答由 Agnes 現場答）
-            if _has_update(mid):
-                continue                      # 已入過隊列，去重
             kind, arg = matched
             jid = enqueue_job(kind, arg, chat_id, message_id, "reclaim", update_id=mid)
+            if jid is None:
+                continue                      # 同 update_id 已入過隊列（DB 唯一約束擋下），跳過
             reclaimed += 1
             print(f"[RECLAIM] 補抓 {jid} ← update {mid} {kind!r} {arg!r} -> chat {chat_id}", flush=True)
         print(f"[RECLAIM] 補抓完成，新增 {reclaimed} 筆離線控制指令", flush=True)
