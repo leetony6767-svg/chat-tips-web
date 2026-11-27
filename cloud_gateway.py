@@ -427,6 +427,34 @@ def jobs_status():
     })
 
 
+@app.route("/worker/enqueue-test", methods=["POST"])
+def worker_enqueue_test():
+    """運測端點：向指定 chat 注入 N 筆控制 job（預設 2 筆 shot），
+    用來不靠使用者手打、驗證「本機 worker 出向取 job → 執行 → 回傳」全鏈。
+    僅 AGENT_KEY 可呼叫；只對已授權 chat 入隊。"""
+    if request.headers.get("X-Agent-Key") != AGENT_KEY:
+        return jsonify({"error": "bad-key"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    chat_id = data.get("chat_id") or ALLOWED_CHAT_ID
+    if not chat_id:
+        return jsonify({"error": "chat_id required"}), 400
+    if not is_authorized(chat_id):
+        return jsonify({"error": "chat not authorized"}), 403
+    try:
+        count = int(data.get("count", 2))
+    except (TypeError, ValueError):
+        count = 2
+    count = max(1, min(count, 10))
+    kind = (data.get("kind") or "shot").lower()
+    enqueued = []
+    for i in range(count):
+        jid = enqueue_job(kind, "", chat_id, None, "test-enqueue")
+        if jid:
+            enqueued.append(jid)
+    print(f"[ENQ-TEST] 注入 {len(enqueued)} 筆 {kind} -> chat {chat_id}", flush=True)
+    return jsonify({"enqueued": enqueued, "kind": kind, "chat_id": chat_id})
+
+
 def setup_webhook():
     """啟動時把 Telegram 指向本 service 的 /telegram-webhook。
 
